@@ -2,60 +2,76 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="診所自費資料分流系統", layout="wide")
+st.set_page_config(page_title="醫師自費資料分流系統-進階版", layout="wide")
 
-st.title("📊 醫師看診自費資料自動分流工具")
-st.info("說明：系統會讀取 'ALL' 頁面，並根據 '醫' 欄位（如 3.0, 4.0）自動分類至分頁 '03', '04' 等。")
+st.title("📊 醫師看診自費資料自動分流 (含每月小計)")
+st.write("操作說明：上傳 Excel 總表後，系統會自動按日期排序並計算每月自費總和。")
 
 # --- 1. 檔案上傳 ---
-uploaded_file = st.file_uploader("請上傳您的 114年自費.xlsx 原始檔案", type=["xlsx"])
+uploaded_file = st.file_uploader("請上傳您的 114年自費.xlsx", type=["xlsx"])
 
 if uploaded_file:
     try:
-        # 讀取原始總表
+        # 讀取原始 ALL 頁面
         df_all = pd.read_excel(uploaded_file, sheet_name="ALL")
         
-        # 清洗數據：移除「醫」欄位為空的列
-        df_all = df_all.dropna(subset=['醫'])
+        # --- 資料預處理 ---
+        # A. 確保「自費」是數字格式
+        df_all['自費'] = pd.to_numeric(df_all['自費'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         
-        # --- 2. 執行分流運算 ---
-        if st.button("開始執行分流與生成報表"):
-            output = BytesIO()
+        # B. 提取月份 (從 1140101 提取出 01)
+        df_all['日期'] = df_all['日期'].astype(str)
+        df_all['月份'] = df_all['日期'].str[3:5] + "月"
+        
+        # C. 依日期排序
+        df_all = df_all.sort_values(by='日期')
+
+        st.subheader("原始資料預覽 (已排序)")
+        st.dataframe(df_all.head(10), use_container_width=True)
+
+        if st.button("🚀 執行分流與計算小計"):
+            # 移除「醫」欄位為空的列
+            df_cleaned = df_all.dropna(subset=['醫'])
             
-            # 取得所有醫師代碼 (例如 3.0, 4.0...)
-            doctor_codes = df_all['醫'].unique()
+            output = BytesIO()
+            doctor_codes = df_cleaned['醫'].unique()
             
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # 首先保留原始 ALL 頁面
+                # 保留原始總表
                 df_all.to_excel(writer, sheet_name="ALL", index=False)
                 
                 # 根據「醫」代碼分流
                 for code in sorted(doctor_codes):
-                    # 格式化代碼：3.0 -> "03", 10.0 -> "10"
-                    sheet_name = str(int(code)).zfill(2)
+                    sheet_name = str(int(float(code))).zfill(2)
                     
-                    # 篩選該醫師的資料
-                    doctor_data = df_all[df_all['醫'] == code]
+                    # 篩選該醫師資料
+                    doctor_data = df_cleaned[df_cleaned['醫'] == code].copy()
                     
-                    # 寫入對應分頁
-                    doctor_data.to_excel(writer, sheet_name=sheet_name, index=False)
+                    # 1. 寫入該醫師的所有看診明細
+                    doctor_data.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+                    
+                    # 2. 計算該醫師的每月小計
+                    summary = doctor_data.groupby('月份')['自費'].sum().reset_index()
+                    summary.columns = ['月份', '該月自費總計']
+                    
+                    # 3. 將小計表格寫在明細資料的下方 (空兩行)
+                    start_row = len(doctor_data) + 3
+                    summary.to_excel(writer, sheet_name=sheet_name, index=False, startrow=start_row)
+                    
+                    # 在 Excel 裡標註這是小計表
+                    worksheet = writer.sheets[sheet_name]
+                    worksheet.cell(row=start_row, column=1, value="--- 每月自費金額統計 ---")
             
-            st.success(f"✅ 分流處理完成！共處理了 {len(doctor_codes)} 位醫師的資料。")
+            st.success(f"✅ 分流與小計計算完成！")
             
-            # --- 3. 提供下載 ---
+            # --- 2. 下載按鈕 ---
             st.download_button(
-                label="📥 下載分類完成的 Excel 檔案",
+                label="📥 下載含每月小計的 Excel 檔案",
                 data=output.getvalue(),
-                file_name="114年自費_各診自動分類版.xlsx",
+                file_name="114年自費_醫師明細與每月小計.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
     except Exception as e:
-        st.error(f"發生錯誤：{e}")
-        st.warning("請確保您的 Excel 檔案中確實有名為 'ALL' 的分頁，且包含 '醫' 欄位。")
-
-# --- 顯示資料預覽 ---
-if uploaded_file:
-    st.divider()
-    st.subheader("原始資料預覽 (ALL)")
-    st.dataframe(pd.read_excel(uploaded_file, sheet_name="ALL").head(10))
+        st.error(f"錯誤：{e}")
+        st.info("提示：請確保 Excel 中包含 'ALL' 頁面，且有 '日期'、'醫'、'自費' 欄位。")
